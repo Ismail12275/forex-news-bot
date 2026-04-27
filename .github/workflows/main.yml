@@ -1,8 +1,8 @@
 name: Forex News Bot
 on:
   schedule:
-    - cron: '*/30 * * * *' # يعمل كل 30 دقيقة
-  workflow_dispatch: # يسمح لك بالتشغيل اليدوي
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -16,8 +16,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Requests Directly
-        run: pip install requests # سنثبت المكتبة مباشرة لتجنب خطأ الملف
+      - name: Install dependencies Directly
+        # هذا السطر هو الحل: تثبيت المكتبة مباشرة وتجاهل ملف المتطلبات
+        run: pip install requests 
 
       - name: Run Bot
         env:
