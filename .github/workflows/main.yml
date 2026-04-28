@@ -1,29 +1,29 @@
-name: 📊 Forex News Alert Bot v4
+name: 📊 Forex Alert Bot v5
 
 on:
   schedule:
-    - cron: "0,30 6-22 * * 1-5"   # كل 30 دقيقة من 06:00-22:00 UTC
+    - cron: "0,30 6-22 * * 1-5"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  send-forex-alerts:
+  run-bot:
     name: Run Forex Alert Bot
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
 
     steps:
       - name: ⬇️ Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python 3.12
+      - name: 🐍 Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: 📦 Install dependencies
+      - name: 📦 Install
         run: pip install requests
 
       - name: 🤖 Run Bot
@@ -32,10 +32,13 @@ jobs:
           CHAT_ID:            ${{ secrets.CHAT_ID }}
           API_KEY:            ${{ secrets.API_KEY }}
           NEWS_API_KEY:       ${{ secrets.NEWS_API_KEY }}
-          GNEWS_API_KEY:      ${{ secrets.GNEWS_API_KEY }}
+          GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
         run: python bot.py
 
-      - name: 🚨 Failure Alert
+      - name: 🚨 Alert on Failure
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -44,4 +47,4 @@ jobs:
           curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
-            -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"🚨 *Bot FAILED* — Check GitHub Actions\",\"parse_mode\":\"Markdown\"}"
+            -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"🚨 Bot FAILED — Check Actions\",\"parse_mode\":\"Markdown\"}"
