@@ -1,7 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   FOREX & GOLD NEWS ALERT BOT v5.2 — bot.py                     ║
-║   التعديلات: إضافة تأخير لـ Gemini وتحديث الرأسيات لتفادي الحظر      ║
+║   FOREX & GOLD NEWS ALERT BOT v5.3                              ║
+║   التعديلات: معالجة 429 لـ Gemini (Exponential Backoff)           ║
+║              معالجة أخطاء DNS للتقويم الاقتصادي (Retry Loop)     ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -53,41 +54,57 @@ def mark_sent(title, source):
     except: pass
 
 # ─────────────────────────── Gemini Analysis ────────────────────
-def analyze_news(title, desc):
+def analyze_news(title, desc, retries=3):
     if not GEMINI_API_KEY: return None
-    # ⚡ حل مشكلة 429: تأخير بسيط بين الطلبات
-    time.sleep(4) 
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     prompt = f"Analyze this Forex news: '{title}. {desc}'. Return JSON: {{'score':0-100, 'impact_gold':'Bullish/Bearish', 'summary_ar':'تلخيص بالعربية'}}"
     
-    try:
-        r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
-        r.raise_for_status()
-        res = r.json()
-        text = res['candidates'][0]['content']['parts'][0]['text']
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        return json.loads(match.group()) if match else None
-    except Exception as e:
-        log.warning(f"⚠️ Gemini Error: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            # تأخير أساسي لعدم إرسال الطلبات دفعة واحدة
+            time.sleep(6) 
+            
+            r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=20)
+            
+            # معالجة خطأ 429: تأخير متزايد (Exponential Backoff)
+            if r.status_code == 429:
+                wait_time = (attempt + 1) * 15 # 15 ثم 30 ثم 45 ثانية
+                log.warning(f"⚠️ Gemini Rate Limit. الانتظار {wait_time} ثانية...")
+                time.sleep(wait_time)
+                continue
+                
+            r.raise_for_status()
+            res = r.json()
+            text = res['candidates'][0]['content']['parts'][0]['text']
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            return json.loads(match.group()) if match else None
+            
+        except Exception as e:
+            log.warning(f"⚠️ Gemini Error (Attempt {attempt+1}): {e}")
+            
+    return None
 
 # ─────────────────────────── Fetch Logic ────────────────────────
 def fetch_calendar():
     url = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"
-    # ⚡ حل مشكلة الحظر: استخدام User-Agent حقيقي
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        return r.json()
-    except Exception as e:
-        log.warning(f"⚠️ Calendar Error: {e}")
-        return []
+    
+    # محاولات متعددة لتجاوز أخطاء الشبكة والـ DNS المؤقتة
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.RequestException as e:
+            log.warning(f"⚠️ Calendar Network Error (Attempt {attempt+1}): {e}")
+            time.sleep(5) # انتظار 5 ثوانٍ قبل المحاولة التالية
+            
+    return []
 
 def fetch_rss():
-    # قائمة المصادر الموثوقة (تم حذف المصادر التي تسبب أخطاء XML)
     sources = {
         "Investing Gold": "https://www.investing.com/rss/news_11.rss",
         "MarketWatch": "https://www.marketwatch.com/rss/topstories",
@@ -131,7 +148,7 @@ def build_news_msg(item):
 # ─────────────────────────── Main Exec ──────────────────────────
 if __name__ == "__main__":
     now_utc = datetime.now(timezone.utc)
-    log.info(f"⚡ Forex Alert Bot v5.2 — {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
+    log.info(f"⚡ Forex Alert Bot v5.3 — {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
 
     # 1. جلب وتحليل الأخبار
     raw_news = fetch_rss()
