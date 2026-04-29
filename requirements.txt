@@ -1,10 +1,6 @@
-# ─────────────────────────────────────────────────────
-#  Forex News Alert Bot — Python dependencies
-#  Install: pip install -r requirements.txt
-# ─────────────────────────────────────────────────────
-
-# HTTP client — used for all API calls (FMP, ForexFactory, Telegram)
 requests==2.32.3
-
-# (Optional) timezone support on Python < 3.9 — uncomment if needed
-# pytz==2024.1
+feedparser==6.0.11
+yfinance==0.2.40
+python-dotenv==1.0.1
+schedule==1.2.2
+pytz==2024.1
