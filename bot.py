@@ -151,19 +151,49 @@ def cleanup_old_hashes() -> None:
 # ════════════════════════════════════════════════════════════════
 # gemini-1.5-flash → gemini-2.0-flash أو gemini-1.5-flash-latest
 
-AI_SYSTEM_PROMPT = """You are a senior financial analyst for Gold (XAUUSD) and USD markets.
-Analyze the news and return ONLY valid JSON, no markdown:
+AI_SYSTEM_PROMPT = """You are a senior financial analyst specializing in Gold (XAUUSD) and USD (DXY) markets.
+
+CRITICAL RULES:
+1. Distinguish news TYPE before scoring:
+   - ECONOMIC_DATA: NFP, CPI, GDP, Housing, PMI, Retail Sales → affects USD directly
+   - MONETARY_POLICY: Fed, FOMC, rate decisions, Powell speech → HIGH impact always
+   - GEOPOLITICAL: wars, sanctions, conflicts → affects Gold via safe-haven, USD varies
+   - OPINION/ANALYSIS: journalist opinion, forecast, "could", "may" → score MAX 45, relevant=false usually
+   - RUMOR/UNVERIFIED: "report says", "sources say", unnamed sources → score MAX 40
+
+2. Economic data logic (DO NOT default Gold=Bullish for everything):
+   - Strong data (beats forecast): USD BULLISH, Gold BEARISH/NEUTRAL
+   - Weak data (misses forecast): USD BEARISH, Gold BULLISH
+   - Housing/Construction beats: USD BULLISH, Gold BEARISH (NOT bullish)
+   - Jobs strong: USD BULLISH, Gold BEARISH
+   - Inflation hot: Gold BULLISH but also USD BULLISH (MIXED)
+
+3. Geopolitical logic:
+   - Active military conflict confirmed: Gold BULLISH, USD MIXED (safe haven both)
+   - Ceasefire/peace: Gold BEARISH, USD MIXED
+   - Unconfirmed conflict rumor: score MAX 55, mark as unverified
+
+4. Score calibration (be precise, NOT everything is 92):
+   - 90-100: FOMC decision, NFP, confirmed war/crisis ONLY
+   - 75-89: CPI, GDP, confirmed geopolitical event
+   - 60-74: ISM, Retail Sales, sanctions, oil crisis
+   - 40-59: minor data, unconfirmed reports
+   - <40: opinion, analysis articles, old news → relevant=false
+
+Return ONLY valid JSON, no markdown:
 {
   "relevant": true/false,
+  "news_type": "ECONOMIC_DATA"|"MONETARY_POLICY"|"GEOPOLITICAL"|"OPINION"|"RUMOR"|"OTHER",
   "score": 0-100,
   "impact_level": "HIGH"|"MEDIUM"|"LOW"|"IGNORE",
   "gold_impact": "BULLISH"|"BEARISH"|"MIXED"|"NEUTRAL",
   "usd_impact": "BULLISH"|"BEARISH"|"MIXED"|"NEUTRAL",
-  "reason_en": "max 12 words",
-  "reason_ar": "أقل من 12 كلمة",
-  "watch": "XAUUSD"|"DXY"|"BOTH"|"NONE"
-}
-Score guide: 80-100=HIGH(wars,Fed,major data), 60-79=MEDIUM(sanctions,oil), 40-59=LOW, <40=IGNORE"""
+  "reason_en": "max 12 words explaining the specific market logic",
+  "reason_ar": "أقل من 12 كلمة مع المنطق الحقيقي",
+  "scenarios": "IF X → Gold Y, IF Z → Gold W (max 20 words)",
+  "watch": "XAUUSD"|"DXY"|"BOTH"|"NONE",
+  "confidence": "HIGH"|"MEDIUM"|"LOW"
+}"""
 
 # نماذج Gemini مرتبة حسب الأولوية
 GEMINI_MODELS = [
@@ -210,19 +240,19 @@ def analyze_with_gemini(title: str, desc: str = "") -> dict | None:
 def analyze_with_groq(title: str, desc: str = "") -> dict | None:
     if not GROQ_API_KEY:
         return None
-    prompt = f"News: {title}\nDetails: {desc[:200] or 'N/A'}"
+    prompt = f"News title: {title}\nDetails: {desc[:300] or 'N/A'}\n\nAnalyze this news. Be precise about news_type. Do NOT default gold=bullish for all news."
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model":       "llama3-8b-8192",
+                "model":       "llama-3.3-70b-versatile",  # أقوى من llama3-8b
                 "messages":    [
                     {"role": "system", "content": AI_SYSTEM_PROMPT},
                     {"role": "user",   "content": prompt},
                 ],
-                "temperature": 0.1,
-                "max_tokens":  250,
+                "temperature": 0.05,  # أقل = أكثر دقة
+                "max_tokens":  350,
             },
             timeout=15,
         )
@@ -230,57 +260,161 @@ def analyze_with_groq(title: str, desc: str = "") -> dict | None:
         content = r.json()["choices"][0]["message"]["content"].strip()
         content = re.sub(r"```json|```|\n", "", content).strip()
         result  = json.loads(content)
-        log.info("🤖 Groq: score=%d gold=%s usd=%s",
-                 result.get("score",0), result.get("gold_impact"), result.get("usd_impact"))
+        log.info("🤖 Groq: type=%s score=%d gold=%s usd=%s conf=%s",
+                 result.get("news_type","?"), result.get("score",0),
+                 result.get("gold_impact"), result.get("usd_impact"),
+                 result.get("confidence","?"))
         return result
     except Exception as e:
         log.warning("⚠️ Groq: %s", e)
         return None
 
 NEWS_RULES = [
-    (["war","military strike","invasion","nuclear","missile attack"],        "BULLISH","MIXED",92),
-    (["ceasefire","peace deal","truce","de-escalat"],                        "BEARISH","MIXED",75),
-    (["federal reserve","fomc","rate hike","tighten","powell hawk"],         "BEARISH","BULLISH",90),
-    (["rate cut","dovish fed","fed pivot","lower rate","rate reduction"],    "BULLISH","BEARISH",90),
-    (["sanction","embargo","trade war","tariff","export ban"],               "BULLISH","MIXED",85),
-    (["inflation surges","cpi higher","hot cpi","ppi higher"],              "BULLISH","MIXED",80),
-    (["inflation cools","deflation","cpi lower","disinflation"],            "BEARISH","BULLISH",75),
-    (["recession","gdp contracts","stagflation","economic crisis"],          "BULLISH","BEARISH",85),
-    (["debt ceiling","us default","shutdown","credit downgrade"],            "BULLISH","BEARISH",90),
-    (["bank collapse","banking crisis","financial crisis"],                  "BULLISH","BEARISH",88),
-    (["safe haven","flight to safety","gold demand","gold rally"],           "BULLISH","BEARISH",80),
-    (["strong gdp","economic expansion","risk on","equity rally"],           "BEARISH","BULLISH",65),
-    (["oil surges","crude rally","opec cut","energy crisis"],               "BULLISH","MIXED",70),
-    (["trade deal","tariff removed","trade agreement"],                      "BEARISH","BULLISH",70),
-    (["job losses","layoffs","unemployment rises","weak jobs"],              "BULLISH","BEARISH",72),
-    (["strong jobs","payroll beat","low unemployment"],                      "BEARISH","BULLISH",72),
-    (["china crisis","china slowdown","taiwan tension"],                     "BULLISH","MIXED",78),
-    (["breaking","urgent","flash","emergency"],                              "MIXED","MIXED",62),
+    # ── MONETARY POLICY (highest impact, precise) ──────────────────────────
+    (["fomc","federal reserve rate decision","rate hike","rate cut","fed funds rate",
+      "raises rates","raises interest","hikes rates","rate decision","fed raises",
+      "bps hike","basis points"],
+     "MONETARY_POLICY", "MIXED","BULLISH",92),  # rate hike = USD up, Gold mixed
+    (["powell hawk","tighten monetary","quantitative tighten","hawkish powell",
+      "hawkish fed","more hikes","restrictive policy"],
+     "MONETARY_POLICY", "BEARISH","BULLISH",88),
+    (["powell dove","rate cut","fed pivot","dovish fed","lower rates","rate reduction",
+      "cuts rates","easing policy","dovish powell","pauses hikes"],
+     "MONETARY_POLICY", "BULLISH","BEARISH",90),
+
+    # ── GEOPOLITICAL (confirmed = high, unconfirmed = medium) ──────────────
+    (["military strike confirmed","invasion begins","war declared","nuclear launch","missile attack confirmed"],
+     "GEOPOLITICAL", "BULLISH","MIXED",88),
+    (["war","armed conflict","troops deployed","military operation"],
+     "GEOPOLITICAL", "BULLISH","MIXED",72),  # lower — needs confirmation
+    (["ceasefire","peace deal","truce","de-escalat","peace agreement"],
+     "GEOPOLITICAL", "BEARISH","MIXED",70),
+    (["sanction","embargo","export ban"],
+     "GEOPOLITICAL", "BULLISH","MIXED",78),
+
+    # ── ECONOMIC DATA (direction matters — not all gold bullish!) ──────────
+    # Inflation: hot = gold UP + usd mixed | cool = gold DOWN
+    (["inflation surges","cpi higher than","hot cpi","ppi higher","core cpi beat",
+      "inflation accelerates","cpi beats","inflation above","prices rise","cpi above forecast",
+      "inflation jumps","inflation unexpectedly"],
+     "ECONOMIC_DATA", "BULLISH","MIXED",82),
+    (["inflation cools","cpi lower","deflation","disinflation","below forecast cpi",
+      "cpi falls","inflation slows","inflation eases","cpi misses","prices fall",
+      "cpi drops","inflation drops","cpi below"],
+     "ECONOMIC_DATA", "BEARISH","BULLISH",78),
+
+    # Jobs: strong = USD UP, Gold DOWN
+    (["payrolls beat","jobs beat","strong nfp","low unemployment","hiring surges",
+      "adds jobs","added jobs","job gains","nfp beats","employment rises",
+      "unemployment falls","unemployment rate falls","jobless rate falls"],
+     "ECONOMIC_DATA", "BEARISH","BULLISH",85),
+    (["job losses","layoffs","unemployment rises","weak jobs","nfp miss","payrolls miss",
+      "unemployment rises","jobless rate rises","jobs disappoint","employment falls"],
+     "ECONOMIC_DATA", "BULLISH","BEARISH",82),
+
+    # GDP / Growth: strong = USD UP, Gold DOWN
+    (["gdp beats","strong gdp","economic expansion","growth accelerates","gdp surpasses",
+      "gdp higher","gdp growth","economy grows","gdp above"],
+     "ECONOMIC_DATA", "BEARISH","BULLISH",75),
+    (["gdp contracts","recession","gdp miss","economic contraction","gdp shrinks",
+      "gdp below","economy shrinks","negative gdp"],
+     "ECONOMIC_DATA", "BULLISH","BEARISH",82),
+
+    # Housing: strong = USD UP (economy healthy), Gold neutral/down
+    (["housing starts beat","building permits surged","housing surpasses forecast"],
+     "ECONOMIC_DATA", "NEUTRAL","BULLISH",62),
+    (["housing starts miss","building permits fell","housing collapse"],
+     "ECONOMIC_DATA", "MIXED","BEARISH",62),
+
+    # Retail Sales
+    (["retail sales beat","consumer spending surges","retail sales surpasses"],
+     "ECONOMIC_DATA", "NEUTRAL","BULLISH",65),
+    (["retail sales miss","consumer spending falls","weak retail"],
+     "ECONOMIC_DATA", "MIXED","BEARISH",65),
+
+    # ── FINANCIAL CRISIS ──────────────────────────────────────────────────
+    (["bank collapse","banking crisis","financial crisis","credit crunch"],
+     "GEOPOLITICAL", "BULLISH","BEARISH",88),
+    (["debt ceiling","us default","credit downgrade","government shutdown"],
+     "GEOPOLITICAL", "BULLISH","BEARISH",85),
+
+    # ── OIL / COMMODITIES ─────────────────────────────────────────────────
+    (["oil surges","crude rally","opec cut","energy crisis","oil spike"],
+     "OTHER", "MIXED","MIXED",65),
+
+    # ── CHINA / GEOPOLITICAL SECONDARY ───────────────────────────────────
+    (["taiwan tension","china military","south china sea"],
+     "GEOPOLITICAL", "BULLISH","MIXED",72),
+    (["china slowdown","china crisis","china gdp miss"],
+     "GEOPOLITICAL", "BULLISH","MIXED",65),
+    (["trade deal","tariff removed","trade agreement signed"],
+     "GEOPOLITICAL", "BEARISH","BULLISH",68),
+    (["tariff","trade war","trade tension"],
+     "GEOPOLITICAL", "BULLISH","MIXED",75),
 ]
 
 def analyze_keywords(title: str, desc: str = "") -> dict | None:
     text = (title + " " + desc).lower()
-    best, gi, ui = 0, "NEUTRAL", "NEUTRAL"
-    for kws, g, u, base in NEWS_RULES:
+
+    # رفض مقالات الرأي والتحليل الغير مؤكد
+    opinion_signals = ["opinion:", "analysis:", "could", "might", "may signal",
+                       "analyst says", "report suggests", "sources say", "according to unnamed",
+                       "scenario", "what if", "could mean", "may indicate"]
+    opinion_count = sum(1 for s in opinion_signals if s in text)
+    if opinion_count >= 2:
+        return None  # مقال رأي — تجاهل
+
+    best, best_type, gi, ui = 0, "OTHER", "NEUTRAL", "NEUTRAL"
+    for kws, ntype, g, u, base in NEWS_RULES:
         hits = sum(1 for k in kws if k in text)
         if hits:
-            s = base + (hits-1)*5
+            # زيادة بسيطة فقط للكلمات المتعددة — بدون مبالغة
+            s = min(base + (hits - 1) * 3, base + 10)
             if s > best:
-                best, gi, ui = s, g, u
-    if best < 55:
+                best, best_type, gi, ui = s, ntype, g, u
+
+    if best < 58:
         return None
+
+    # تحديد اتجاه الذهب بناءً على السياق الكامل
+    # إذا كان USD bullish مع data قوية → Gold bearish عادةً
+    if best_type == "ECONOMIC_DATA" and ui == "BULLISH" and gi == "NEUTRAL":
+        gi = "BEARISH"  # اقتصاد قوي = Gold تنخفض غالباً
+
+    # سيناريوهات حسب النوع
+    scenarios_map = {
+        "ECONOMIC_DATA":   "If data beats → USD up, Gold down | If miss → Gold up",
+        "MONETARY_POLICY": "If hawkish → USD up, Gold down | If dovish → Gold up",
+        "GEOPOLITICAL":    "If escalates → Gold up | If resolves → Gold down",
+        "OTHER":           "Watch price reaction before trading",
+    }
+
     return {
         "relevant":     True,
+        "news_type":    best_type,
         "score":        best,
-        "impact_level": "HIGH" if best>=80 else ("MEDIUM" if best>=65 else "LOW"),
+        "impact_level": "HIGH" if best >= 80 else ("MEDIUM" if best >= 65 else "LOW"),
         "gold_impact":  gi,
         "usd_impact":   ui,
-        "reason_en":    "Keyword-based analysis",
-        "reason_ar":    "تحليل الكلمات المفتاحية",
-        "watch":        "BOTH",
+        "reason_en":    f"Keyword match: {best_type.lower().replace('_',' ')} event",
+        "reason_ar":    f"تحليل مؤشرات: حدث {best_type}",
+        "scenarios":    scenarios_map.get(best_type, "Monitor price action"),
+        "watch":        "BOTH" if best >= 75 else ("XAUUSD" if gi != "NEUTRAL" else "DXY"),
+        "confidence":   "LOW",  # keyword-only = low confidence دائماً
     }
 
 def analyze_news(title: str, desc: str = "") -> dict | None:
+    # فلتر مسبق: تجاهل مقالات الرأي والتحليل قبل استدعاء AI
+    text_lower = (title + " " + desc).lower()
+    opinion_patterns = [
+        "opinion:", "analysis:", "commentary:", "perspective:",
+        "what this means", "here's why", "explained:", "breakdown:",
+        "should you", "how to trade", "trading guide",
+    ]
+    if any(p in text_lower for p in opinion_patterns):
+        log.debug("🚫 Opinion article skipped: %s", title[:60])
+        return None
+
     result = analyze_with_groq(title, desc)
     if result is None:
         result = analyze_with_gemini(title, desc)
@@ -288,8 +422,18 @@ def analyze_news(title: str, desc: str = "") -> dict | None:
         result = analyze_keywords(title, desc)
     if result is None:
         return None
-    if result.get("impact_level") in ("LOW","IGNORE") or result.get("score",0) < 60:
+
+    # رفض أخبار RUMOR و OPINION من AI أيضاً
+    if result.get("news_type") in ("OPINION", "RUMOR"):
+        log.debug("🚫 AI classified as opinion/rumor: %s", title[:60])
         return None
+
+    # رفض بناءً على relevant أو score أو impact
+    if not result.get("relevant", True):
+        return None
+    if result.get("impact_level") in ("LOW", "IGNORE") or result.get("score", 0) < 60:
+        return None
+
     return result
 
 
@@ -602,15 +746,35 @@ IMPACT_EMOJI = {
     "NEUTRAL": "⚪ NEUTRAL | محايد",
 }
 
+NEWS_TYPE_LABEL = {
+    "ECONOMIC_DATA":   "📈 Economic Data",
+    "MONETARY_POLICY": "🏦 Monetary Policy",
+    "GEOPOLITICAL":    "🌍 Geopolitical",
+    "RUMOR":           "❓ Unverified Report",
+    "OPINION":         "💬 Opinion/Analysis",
+    "OTHER":           "📰 Market News",
+}
+
+CONFIDENCE_LABEL = {
+    "HIGH":   "✅ High Confidence",
+    "MEDIUM": "⚠️ Medium Confidence",
+    "LOW":    "🔶 Low Confidence (keywords only)",
+}
+
 def build_news_msg(item: dict) -> str:
     a    = item["analysis"]
     now  = datetime.now(NY_TZ).strftime("%I:%M %p ET")
-    icon = "🚨" if a["score"]>=80 else ("⚡" if a["score"]>=65 else "📢")
-    lvl  = "🔴 HIGH IMPACT" if a["impact_level"]=="HIGH" else "🟡 MEDIUM IMPACT"
+    score = a.get("score", 0)
+    icon = "🚨" if score >= 80 else ("⚡" if score >= 65 else "📢")
+    lvl  = "🔴 HIGH IMPACT" if a["impact_level"] == "HIGH" else "🟡 MEDIUM IMPACT"
+    ntype = NEWS_TYPE_LABEL.get(a.get("news_type", "OTHER"), "📰 Market News")
+    conf  = CONFIDENCE_LABEL.get(a.get("confidence", "LOW"), "")
+
     lines = [
         f"{icon} *BREAKING NEWS | خبر عاجل*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"📡 *{item['source']}*   🕐 {now}",
+        f"🏷 {ntype}",
         "",
         f"📰 *{item['title'][:200]}*",
     ]
@@ -618,20 +782,27 @@ def build_news_msg(item: dict) -> str:
         lines.append(f"_{item['description'][:150]}..._")
     lines += [
         "",
-        f"*{lvl}*   Score: `{a['score']}/100`",
+        f"*{lvl}*   Score: `{score}/100`   {conf}",
         "",
         "*📊 Expected Impact | التأثير المتوقع:*",
-        f"🥇 Gold  | الذهب:   {IMPACT_EMOJI.get(a['gold_impact'],a['gold_impact'])}",
-        f"💵 USD   | الدولار: {IMPACT_EMOJI.get(a['usd_impact'],a['usd_impact'])}",
+        f"🥇 Gold  | الذهب:   {IMPACT_EMOJI.get(a['gold_impact'], a['gold_impact'])}",
+        f"💵 USD   | الدولار: {IMPACT_EMOJI.get(a['usd_impact'], a['usd_impact'])}",
         "",
-        f"💡 _{a.get('reason_en','')}_",
-        f"💡 _{a.get('reason_ar','')}_",
+        f"💡 _{a.get('reason_en', '')}_",
+        f"💡 _{a.get('reason_ar', '')}_",
+    ]
+
+    # إضافة سيناريوهات إذا كانت موجودة
+    if a.get("scenarios") and a.get("confidence") != "LOW":
+        lines += ["", f"🔀 *Scenarios:* _{a['scenarios']}_"]
+
+    lines += [
         "",
-        f"⚠️ *Watch {a.get('watch','XAUUSD')} volatility*",
+        f"⚠️ *Watch {a.get('watch', 'XAUUSD')} volatility*",
     ]
     if item.get("link"):
         lines.append(f"\n🔗 [Read more]({item['link']})")
-    lines += ["━━━━━━━━━━━━━━━━━━━━━━━━━━━","🤖 _Forex Alert Bot v5.1_"]
+    lines += ["━━━━━━━━━━━━━━━━━━━━━━━━━━━", "🤖 _Forex Alert Bot v5.2_"]
     return "\n".join(lines)
 
 def build_calendar_msg(released: list[dict], upcoming: list[dict]) -> str:
@@ -680,7 +851,7 @@ def build_calendar_msg(released: list[dict], upcoming: list[dict]) -> str:
     if not upcoming:
         lines += [f"   _لا أحداث قادمة خلال {UPCOMING_WINDOW_H}h_",""]
 
-    lines += ["━━━━━━━━━━━━━━━━━━━━━━━━━━━","🤖 _Forex Alert Bot v5.1_"]
+    lines += ["━━━━━━━━━━━━━━━━━━━━━━━━━━━","🤖 _Forex Alert Bot v5.2_"]
     return "\n".join(lines)
 
 
@@ -715,7 +886,7 @@ def send_telegram(msg: str) -> bool:
 
 def run() -> None:
     now_utc = datetime.now(timezone.utc)
-    log.info("⚡ Forex Alert Bot v5.1 — %s UTC", now_utc.strftime("%Y-%m-%d %H:%M"))
+    log.info("⚡ Forex Alert Bot v5.2 — %s UTC", now_utc.strftime("%Y-%m-%d %H:%M"))
     log.info("🤖 AI: %s | 💾 Dedup: %s",
              "Groq" if GROQ_API_KEY else ("Gemini" if GEMINI_API_KEY else "Keywords"),
              "Supabase" if (SUPABASE_URL and SUPABASE_KEY) else "In-Memory")
